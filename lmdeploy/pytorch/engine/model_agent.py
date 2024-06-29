@@ -9,7 +9,6 @@ from typing import Any, Callable, Dict, List
 import torch
 import torch.distributed as dist
 from torch import multiprocessing as mp
-from transformers import AutoModelForCausalLM
 
 from lmdeploy.pytorch.accel import LoadNoInit
 from lmdeploy.utils import get_logger
@@ -80,6 +79,21 @@ def _update_cache_config(model_config: ModelConfig,
         logger.debug('estimated max runtime memory:'
                      f' {runtime_cache_size>>20} mb')
         return gpu_mem_physical_free * cache_config.cache_max_entry_count
+
+    def __adjust_block_size():
+        """adjust block_size."""
+        # TODO: support kernel with both large head dim and large block size.
+        if model_config.k_head_dim >= 512 and cache_config.block_size > 32:
+            cache_config.block_size = 32
+            rank = 0
+            if dist.is_initialized():
+                rank = dist.get_rank()
+            if rank == 0:
+                logger.warning(
+                    f'Update `block_size={cache_config.block_size}`'
+                    f' for large `head_dim={model_config.k_head_dim}`.')
+
+    __adjust_block_size()
 
     cache_block_size = CacheEngine.get_cache_block_size(
         cache_config.block_size, model_config, world_size)
@@ -275,7 +289,7 @@ class ModelInputs:
             if overlap:
                 block_end += 1
 
-            block_offsets = self.block_offsets[:, :block_end]
+            block_offsets = self.block_offsets
             inp = ModelInputs(
                 input_ids=self.input_ids[:, start:end],
                 seq_length=input_ids.new_tensor([end - start]),
@@ -362,7 +376,8 @@ class StepContext:
 
         # for vlm
         input_embeddings, input_embedding_indexing = None, None
-        if inputs.vision_inputs is not None:
+        if (inputs.vision_inputs is not None
+                and inputs.vision_inputs.input_embeddings is not None):
             input_embeddings, input_embedding_indexing = \
                 inputs.vision_inputs.get_inputs(history_lengths, q_seq_length)
 
@@ -656,13 +671,12 @@ class BaseModelAgent(AutoModelAgent):
         device = 'cuda'
         with LoadNoInit(), warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            model_init_kwargs = dict(torch_dtype=torch_dtype,
-                                     device_map=device)
-            model_init_kwargs.update(self.model_config.init_kwargs)
-            if self.model_config.auto_model_cls is AutoModelForCausalLM:
-                model_init_kwargs['trust_remote_code'] = trust_remote_code
             hf_model = self.model_config.auto_model_cls.from_pretrained(
-                model_path, **model_init_kwargs)
+                model_path,
+                torch_dtype=torch_dtype,
+                device_map=device,
+                trust_remote_code=trust_remote_code,
+                **self.model_config.init_kwargs)
             hf_model.eval()
             hf_model.config.use_cache = True
             # build for vlm model
@@ -819,18 +833,13 @@ def _tp_build_model(
         config = model_config.hf_config
         torch_dtype = model_config.dtype
         device_map = None
-        model_init_kwargs = dict(torch_dtype=torch_dtype)
-        model_init_kwargs.update(model_config.init_kwargs)
-        # deal with AutoModel or Non-AutoModel
-        if model_config.auto_model_cls is AutoModelForCausalLM:
-            model_init_kwargs['trust_remote_code'] = trust_remote_code
-            from_config_func = AutoModelForCausalLM.from_config
-        else:
-            from_config_func = model_config.auto_model_cls._from_config
-
         with init_empty_weights(), warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            model = from_config_func(config, **model_init_kwargs)
+            model = model_config.auto_model_cls.from_config(
+                config,
+                torch_dtype=torch_dtype,
+                trust_remote_code=trust_remote_code,
+                **model_config.init_kwargs)
             # build for vlm model
             _remove_unused_modules(model, model_config)
             if rank == 0:
@@ -839,6 +848,7 @@ def _tp_build_model(
             if rank == 0:
                 # adapter would remove weight of linear.
                 device_map = _create_device_map(model, world_size, device_map)
+
         model.eval()
         model.config.use_cache = True
 
