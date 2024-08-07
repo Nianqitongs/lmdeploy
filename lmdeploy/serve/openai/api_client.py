@@ -7,14 +7,21 @@ import requests
 from lmdeploy.utils import get_logger
 
 
-def get_model_list(api_url: str):
+def get_model_list(api_url: str, headers: dict = None):
     """Get model list from api server."""
-    response = requests.get(api_url)
-    if hasattr(response, 'text'):
-        model_list = json.loads(response.text)
+    response = requests.get(api_url, headers=headers)
+    logger = get_logger('lmdeploy')
+    if not response.ok:
+        logger.error(f'Failed to get the model list: {api_url}'
+                     'returns {response.status_code}')
+        return None
+    elif not hasattr(response, 'text'):
+        logger.warning('Failed to get the model list.')
+        return None
+    else:
+        model_list = response.json()
         model_list = model_list.pop('data', [])
         return [item['id'] for item in model_list]
-    return None
 
 
 def json_loads(content):
@@ -59,13 +66,9 @@ class APIClient:
         """Show available models."""
         if self._available_models is not None:
             return self._available_models
-        response = requests.get(self.models_v1_url, headers=self.headers)
-        if hasattr(response, 'text'):
-            model_list = json_loads(response.text)
-            model_list = model_list.pop('data', [])
-            self._available_models = [item['id'] for item in model_list]
-            return self._available_models
-        return None
+        self._available_models = get_model_list(self.models_v1_url,
+                                                headers=self.headers)
+        return self._available_models
 
     def encode(self,
                input: Union[str, List[str]],
@@ -96,6 +99,8 @@ class APIClient:
                             messages: Union[str, List[Dict[str, str]]],
                             temperature: Optional[float] = 0.7,
                             top_p: Optional[float] = 1.0,
+                            logprobs: Optional[bool] = False,
+                            top_logprobs: Optional[int] = 0,
                             n: Optional[int] = 1,
                             max_tokens: Optional[int] = None,
                             stop: Optional[Union[str, List[str]]] = None,
@@ -425,10 +430,14 @@ def get_streaming_response(
             yield output, tokens, finish_reason
 
 
-def main(api_server_url: str,
+def main(api_server_url: str = 'http://0.0.0.0:23333',
          session_id: int = 0,
          api_key: Optional[str] = None):
     """Main function to chat in terminal."""
+    if not api_server_url.startswith('http://'):
+        print(f'[WARNING] api_server_url of the api_server should '
+              f'start with "http://", but got "{api_server_url}"')
+        api_server_url = 'http://' + api_server_url.strip()
     api_client = APIClient(api_server_url, api_key=api_key)
     while True:
         prompt = input_prompt()

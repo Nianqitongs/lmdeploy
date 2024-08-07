@@ -14,7 +14,7 @@ class GenerationConfig:
 
     Args:
         n (int): Define how many chat completion choices to generate for each
-            input message
+            input message. **Only 1** is supported now.
         max_new_tokens (int): The maximum number of tokens that can be
             generated in the chat completion
         top_p (float): An alternative to sampling with temperature, called
@@ -226,7 +226,7 @@ class PytorchEngineConfig:
         assert self.max_prefill_token_num >= 0, 'invalid max_prefill_token_num'
         assert self.num_gpu_blocks >= 0, 'invalid num_gpu_blocks'
         assert self.device_type in [
-            'cuda'
+            'cuda', 'ascend'
         ], (f'invalid device_type: {self.device_type}')
 
 
@@ -298,5 +298,9 @@ class VisionConfig:
         max_batch_size (int): the max image size passed to the model, since
             some models will use image patch, the actual running batch could
             be larger than this value.
+        thread_safe (bool): Specifies whether the engine instance is
+            thread-safe. Please set it to True when using the pipeline
+            in a multi-threaded environment.
     """
     max_batch_size: int = 1
+    thread_safe: bool = False

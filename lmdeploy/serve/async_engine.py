@@ -1,6 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import asyncio
 import dataclasses
+import json
 import os
 import random
 from contextlib import asynccontextmanager
@@ -506,14 +507,21 @@ class AsyncEngine(LogitsMixin):
 
         proc.join()
 
-    async def _get_prompt_input(self, prompt: str, do_preprocess: bool,
-                                sequence_start: bool, adapter_name: str):
+    async def _get_prompt_input(self,
+                                prompt: str,
+                                do_preprocess: bool,
+                                sequence_start: bool,
+                                adapter_name: str,
+                                tools: Optional[List[object]] = None,
+                                **kwargs):
         if do_preprocess:
             # use adapter's chat template if possible
             chat_template = self.chat_template
             if adapter_name in MODELS.module_dict:
                 chat_template = MODELS.module_dict[adapter_name]()
-            prompt = chat_template.messages2prompt(prompt, sequence_start)
+            prompt = chat_template.messages2prompt(prompt,
+                                                   sequence_start,
+                                                   tools=tools)
         input_ids = self.tokenizer.encode(prompt, add_bos=sequence_start)
         return {'prompt': prompt, 'input_ids': input_ids}
 
@@ -523,6 +531,7 @@ class AsyncEngine(LogitsMixin):
             session_id: int,
             gen_config: Optional[Union[GenerationConfig,
                                        EngineGenerationConfig]] = None,
+            tools: Optional[List[object]] = None,
             stream_response: bool = True,
             sequence_start: bool = True,
             sequence_end: bool = True,  # no interactive mode by default
@@ -558,11 +567,17 @@ class AsyncEngine(LogitsMixin):
         # set random if it is not set and sequence_start is True
         if gen_config.random_seed is None and sequence_start:
             gen_config.random_seed = random.getrandbits(64)
+        if gen_config.n > 1:
+            logger.warning(f"n({gen_config.n}) > 1 hasn't been supported yet. "
+                           f'Fallback to 1')
+            gen_config.n = 1
         prompt = messages
 
-        prompt_input = await self._get_prompt_input(prompt, do_preprocess,
+        prompt_input = await self._get_prompt_input(prompt,
+                                                    do_preprocess,
                                                     sequence_start,
-                                                    adapter_name)
+                                                    adapter_name,
+                                                    tools=tools)
         prompt = prompt_input['prompt']
         input_ids = prompt_input['input_ids']
         finish_reason = None
@@ -600,6 +615,7 @@ class AsyncEngine(LogitsMixin):
             generator = await self.get_generator(False, session_id)
             async with self.safe_run(session_id):
                 state = DetokenizeState(len(input_ids))
+                start_ids_offset = state.ids_offset
                 response = ''
                 async for outputs in generator.async_stream_infer(
                         session_id=session_id,
@@ -624,7 +640,8 @@ class AsyncEngine(LogitsMixin):
                     res = res[ids_offset:]
                     logprobs = None
                     if outputs.logprobs:
-                        logprobs = outputs.logprobs[ids_offset:]
+                        log_offset = ids_offset - start_ids_offset
+                        logprobs = outputs.logprobs[log_offset:]
 
                     # response, history token len,
                     # input token len, gen token len
@@ -648,6 +665,28 @@ class AsyncEngine(LogitsMixin):
                 # TODO modify pytorch or turbomind api
                 if self.backend == 'pytorch' and sequence_end:
                     await self.end_session(session_id)
+
+    def parse_tool_response(self, text, tools, **kwargs):
+        """Parse model response containing tool information.
+
+        Args:
+            text(str): model response in string format
+            tools(List): tools from user request
+        """
+        if '<|plugin|>' in text:  # internlm2
+            text, action = text.split('<|action_start|><|plugin|>')
+            action = action.split('<|action_end|>'.strip())[0]
+            action = action[action.find('{'):]
+            action = json.loads(action)
+            name, parameters = action['name'], json.dumps(action['parameters'])
+        elif '<function=' in text:  # llama3.1
+            action, _ = text.split('</function>')
+            parameters = action[action.find('{'):]
+            name = action.split('<function=')[1].split('>{')[0]
+        else:
+            raise RuntimeError(f'Unexpected model response: {text}')
+        action_id = [tool.function.name for tool in tools].index(name)
+        return text, action_id, name, parameters
 
     def chat(self,
              prompt: str,

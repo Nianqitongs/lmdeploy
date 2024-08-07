@@ -17,7 +17,7 @@
  */
 
 // Modified from
-// https://github.com/NVIDIA/FasterTransformer/blob/main/src/turbomind/models/multi_gpu_gpt/ParallelGpt.h
+// https://github.com/NVIDIA/FasterTransformer/blob/main/src/fastertransformer/models/multi_gpu_gpt/ParallelGpt.h
 
 #pragma once
 
@@ -75,6 +75,7 @@ public:
             cudaStream_t                 stream,
             cublasMMWrapper*             cublas_wrapper,
             IAllocator*                  allocator,
+            IAllocator*                  peer_allocator,
             bool                         is_free_buffer_after_forward,
             cudaDeviceProp*              cuda_device_prop);
 
@@ -179,6 +180,7 @@ private:
     cudaStream_t     stream_;
     cublasMMWrapper* cublas_wrapper_;
     IAllocator*      allocator_;
+    IAllocator*      peer_allcator_;
     bool             is_free_buffer_after_forward_;
     cudaDeviceProp*  cuda_device_prop_;
 
